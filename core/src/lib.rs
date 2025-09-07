@@ -129,25 +129,33 @@ impl Bot {
                         *dashboard = Some(dashboard_data);
                     }
                     Err(e) => {
-                        todo!("Handle error: {}", e);
+                        println!("Failed to get server data: {}. Will retry soon.", e);
+                        // Avoid panicking; wait a bit and return so caller can retry
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        return;
                     }
                 }
             }
             self.get_token();
         }
 
+        // If server data still isn't available, bail out safely
         let server_data = self.info.server_data.lock().unwrap();
-        let server = server_data.as_ref().expect("Server data not set");
+        let Some(server) = server_data.as_ref() else {
+            println!("Server data not available; skipping connect and retrying later.");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            return;
+        };
 
         let socket_address =
             SocketAddr::from_str(&format!("{}:{}", server.server, server.port)).unwrap();
 
         let mut host = self.host.lock().unwrap();
-        match host.connect(socket_address, 2, 0) {
-            Err(err) => {
-                panic!("Failed to connect to server: {}", err);
-            }
-            _ => {}
+        if let Err(err) = host.connect(socket_address, 2, 0) {
+            println!("Failed to connect to server: {}", err);
+            // Wait briefly before the outer loop retries
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            return;
         }
     }
 

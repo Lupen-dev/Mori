@@ -13,6 +13,8 @@ use gt_core::gtitem_r;
 use gt_core::gtitem_r::structs::ItemDatabase;
 use gt_core::Bot;
 use gt_core::types::bot::LoginVia;
+mod growtopia_login;
+use growtopia_login::{perform_google_login, LoginCredentials};
 
 #[derive(Debug, PartialEq, Clone)]
 enum LoginType {
@@ -35,6 +37,7 @@ struct UiState {
     login_type: LoginType,
     ltoken_string: String,
     legacy_fields: [String; 2],
+    google_fields: [String; 2],
     // Bots list
     bots: Vec<Arc<Bot>>,
 }
@@ -59,6 +62,7 @@ impl Default for UiState {
             login_type: LoginType::LEGACY,
             ltoken_string: String::new(),
             legacy_fields: Default::default(),
+            google_fields: Default::default(),
             bots: Vec::new(),
         }
     }
@@ -189,7 +193,7 @@ fn setup_ui_system(
             ui.vertical(|ui| {
                 ui.label("Login Method:");
                 ui.horizontal(|ui| {
-                    let _ = ui.add_enabled(false, egui::Button::new("Google"));
+                    ui.selectable_value(&mut ui_state.login_type, LoginType::GOOGLE, "Google");
                     let _ = ui.add_enabled(false, egui::Button::new("Apple"));
                     let _ = ui.add_enabled(false, egui::Button::new("LTOKEN"));
                     ui.selectable_value(&mut ui_state.login_type, LoginType::LEGACY, "Legacy");
@@ -199,9 +203,15 @@ fn setup_ui_system(
 
                 match ui_state.login_type {
                     LoginType::GOOGLE => {
-                        ui.label(egui::RichText::new("Google login - Coming soon")
-                            .color(egui::Color32::from_rgb(150, 150, 150)));
-                        ui.label("No additional fields required.");
+                        ui.label("Google login requires your Google account email and password. These are only used locally to automate the official Google sign-in flow in a Chromium instance.");
+                        ui.horizontal(|ui| {
+                            ui.label("Email:");
+                            ui.text_edit_singleline(&mut ui_state.google_fields[0]);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Password:");
+                            ui.add(egui::TextEdit::singleline(&mut ui_state.google_fields[1]).password(true));
+                        });
                     }
                     LoginType::APPLE => {
                         ui.label(egui::RichText::new("Apple login - Coming soon")
@@ -263,7 +273,39 @@ fn setup_ui_system(
                         };
 
                         let item_database = Arc::clone(&ui_state.item_database);
-                        let bot = Bot::new(login_via, None, item_database);
+                        // Provide a token_fetcher to integrate Google login when selected
+                        let token_fetcher: Option<Box<dyn Fn(String) -> String + Send + Sync>> =
+                            if ui_state.login_type == LoginType::GOOGLE {
+                                let email = ui_state.google_fields[0].clone();
+                                let password = ui_state.google_fields[1].clone();
+                                Some(Box::new(move |_login_url: String| {
+                                    // Spawn a runtime to block-on the async chromiumoxide flow
+                                    let creds = LoginCredentials {
+                                        email: email.clone(),
+                                        password: password.clone(),
+                                        recovery_email: None,
+                                        proxy: None,
+                                        headless: false,
+                                    };
+
+                                    // Build a lightweight runtime only if the backend is enabled
+                                    let rt = tokio::runtime::Builder::new_current_thread()
+                                        .enable_all()
+                                        .build()
+                                        .expect("Failed to build tokio runtime");
+                                    let result = rt.block_on(async move { perform_google_login(creds).await });
+                                    if result.success {
+                                        result.token.unwrap_or_default()
+                                    } else {
+                                        println!("Google login failed: {:?}", result.error);
+                                        String::new()
+                                    }
+                                }))
+                            } else {
+                                None
+                            };
+
+                        let bot = Bot::new(login_via, token_fetcher, item_database);
 
                         let bot_clone = Arc::clone(&bot);
 
@@ -276,6 +318,7 @@ fn setup_ui_system(
                         ui_state.add_bot_window_open = false;
                         ui_state.legacy_fields = Default::default();
                         ui_state.ltoken_string = String::new();
+                        ui_state.google_fields = Default::default();
                         ui_state.login_type = LoginType::LEGACY;
 
                         println!("Bot created and added to bots list");
